@@ -42,6 +42,112 @@ cat <<EOF >"$BUILD_SCRIPT"
         --extra-version="\$(date +%Y%m%d)"
     make -j\$(nproc) V=1
     make install install-doc
+    DOC_DIR="/ffbuild/prefix/share/doc/ffmpeg"
+    echo "Checking DOC_DIR: \$DOC_DIR"
+    if [ -d "\$DOC_DIR" ]; then
+        echo "DOC_DIR exists. Listing content:"
+        ls -F "\$DOC_DIR"
+        if ! command -v doxygen >/dev/null 2>&1; then
+            echo "Doxygen not found. Attempting installation..."
+            if [ "\$(id -u)" -eq 0 ]; then
+                echo "Running as root. Installing via apt..."
+                apt-get -y update
+                apt-get -y install --no-install-recommends doxygen graphviz
+            else
+                echo "Not root. Downloading static doxygen..."
+                DOXYGEN_VER="1.10.0"
+                wget -q -O doxygen.tar.gz "https://www.doxygen.nl/files/doxygen-\${DOXYGEN_VER}.linux.bin.tar.gz"
+                if [ -f doxygen.tar.gz ]; then
+                    tar -xf doxygen.tar.gz
+                    export PATH="\$PWD/doxygen-\${DOXYGEN_VER}/bin:\$PATH"
+                fi
+            fi
+        fi
+        if command -v doxygen >/dev/null 2>&1; then
+             echo "Generating API documentation..."
+             make apidoc
+             if [ -d "doc/doxy/html" ]; then
+                 mkdir -p "\$DOC_DIR/api"
+                 cp -r doc/doxy/html/* "\$DOC_DIR/api"
+             else
+                 echo "API documentation generation failed or output not found."
+             fi
+        fi
+        # Try to install pandoc if missing, or download static binary
+        if ! command -v pandoc >/dev/null 2>&1; then
+            echo "Pandoc not found. Attempting installation..."
+            if [ "\$(id -u)" -eq 0 ]; then
+                echo "Running as root. Installing via apt..."
+                apt-get -y update
+                apt-get -y install --no-install-recommends pandoc
+            else
+                echo "Not root (UID: \$(id -u)). Downloading static pandoc..."
+                PANDOC_VER="3.8.3"
+                ARCH="\$(uname -m)"
+                PANDOC_ARCH=""
+                if [ "\$ARCH" = "x86_64" ]; then PANDOC_ARCH="amd64"; 
+                elif [ "\$ARCH" = "aarch64" ]; then PANDOC_ARCH="arm64"; fi
+                if [ -n "\$PANDOC_ARCH" ]; then
+                    echo "Downloading pandoc-\${PANDOC_VER}-linux-\${PANDOC_ARCH}.tar.gz ..."
+                    wget -q -O pandoc.tar.gz "https://github.com/jgm/pandoc/releases/download/\${PANDOC_VER}/pandoc-\${PANDOC_VER}-linux-\${PANDOC_ARCH}.tar.gz"
+                    if [ -f pandoc.tar.gz ]; then
+                        echo "Download successful. Extracting..."
+                        tar -xf pandoc.tar.gz
+                        export PATH="\$PWD/pandoc-\${PANDOC_VER}/bin:\$PATH"
+                        echo "Pandoc path updated: \$(command -v pandoc)"
+                        pandoc --version | head -n 1
+                    else
+                        echo "Download failed!"
+                    fi
+                else
+                     echo "Unsupported architecture for static pandoc: \$ARCH"
+                fi
+            fi
+        else
+            echo "Pandoc already installed: \$(command -v pandoc)"
+        fi
+        if command -v pandoc >/dev/null 2>&1; then
+            echo "Starting HTML to Markdown/Text conversion..."
+            find "\$DOC_DIR" -type f -name "*.html" -print0 | while IFS= read -r -d "" html; do
+                base="\$(basename "\$html" .html)"
+                dir="\$(dirname "\$html")"
+                echo "Converting \$base.html -> \$base.md / \$base.txt"
+                pandoc -f html -t markdown "\$html" -o "\$dir/\$base.md"
+                pandoc -f html -t plain "\$html" -o "\$dir/\$base.txt"
+            done
+        else
+            echo "Pandoc command not found, skipping Markdown/Text generation."
+        fi
+        if command -v makeinfo >/dev/null 2>&1; then
+            echo "Starting Texi to Text conversion..."
+            for texi in doc/*.texi; do
+                [ -f "\$texi" ] || continue
+                base="\$(basename "\$texi" .texi)"
+                echo "Converting \$base.texi -> \$base.txt"
+                makeinfo --force --no-headers -o "\$DOC_DIR/\$base.txt" "\$texi"
+            done
+        else
+            echo "makeinfo command not found, skipping Text generation."
+        fi
+        echo "Final DOC_DIR content:"
+        ls -F "\$DOC_DIR"
+        # Cleanup if we downloaded
+        if [ -n "\$PANDOC_VER" ] && [ -d "pandoc-\${PANDOC_VER}" ]; then
+            rm -rf "pandoc-\${PANDOC_VER}" pandoc.tar.gz
+        fi
+        if [ -n "\$DOXYGEN_VER" ] && [ -d "doxygen-\${DOXYGEN_VER}" ]; then
+            rm -rf "doxygen-\${DOXYGEN_VER}" doxygen.tar.gz
+        fi
+        # Cleanup if we installed via apt
+        if [ "\$(id -u)" -eq 0 ]; then
+             apt-get -y purge pandoc doxygen graphviz || true
+             apt-get -y autoremove
+             apt-get -y clean
+             rm -rf /var/lib/apt/lists/*
+        fi
+    else
+        echo "DOC_DIR \$DOC_DIR does not exist! Skipping doc generation."
+    fi
 EOF
 
 [[ -t 1 ]] && TTY_ARG="-t" || TTY_ARG=""
