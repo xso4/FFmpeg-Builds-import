@@ -22,7 +22,7 @@ jobs:
       # 使用 PAT 令牌以获得推送权限
       # fetch-depth: 0 拉取所有历史记录，以便 git merge-base 可以正常工作
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           token: ${{ secrets.FFMPEG_UPDATE_TOKEN }}
           fetch-depth: 0
