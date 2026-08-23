@@ -3,17 +3,10 @@ set -xeo pipefail
 cd "$(dirname "$0")"
 source util/vars.sh
 
-TMPCFG="$(mktemp --suffix=.toml)"
-cat <<EOF >"$TMPCFG"
-[worker.oci]
-  max-parallelism = 4
-EOF
-trap "rm -f '$TMPCFG'" EXIT
-
 docker buildx inspect ffbuilder &>/dev/null || docker buildx create \
     --bootstrap \
     --name ffbuilder \
-    --config "$TMPCFG" \
+    --buildkitd-flags "--oci-max-parallelism=4" \
     --driver-opt network=host \
     --driver-opt env.BUILDKIT_STEP_LOG_MAX_SIZE=-1 \
     --driver-opt env.BUILDKIT_STEP_LOG_MAX_SPEED=-1
