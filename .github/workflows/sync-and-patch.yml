@@ -1,0 +1,145 @@
+# .github/workflows/sync-and-patch.yml
+
+name: Sync with Upstream and Patch
+
+on:
+  # 1. 定时触发
+  schedule:
+    - cron: '18 17 * * 0,3'
+  # 2. 手动触发：允许在 Actions 页面手动运行此工作流
+  workflow_dispatch:
+
+# 设置工作流的默认权限，写入内容和操作 Actions
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  sync_and_build:
+    runs-on: ubuntu-latest
+    steps:
+      # 步骤 a: 检出代码
+      # 使用 PAT 令牌以获得推送权限
+      # fetch-depth: 0 拉取所有历史记录，以便 git merge-base 可以正常工作
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.FFMPEG_UPDATE_TOKEN }}
+          fetch-depth: 0
+
+      # 步骤 b: 检查上游仓库是否有更新 (已改进，可处理不相关历史)
+      - name: Check for upstream updates
+        id: check_update
+        run: |
+          # 设置 Git 用户信息，用于后续的 commit
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          UPSTREAM_REPO="https://github.com/BtbN/FFmpeg-Builds.git"
+          echo "Adding upstream remote: $UPSTREAM_REPO"
+          git remote add upstream $UPSTREAM_REPO
+          git fetch upstream master
+          
+          # 获取上游 master 分支的最新 commit 哈希值
+          UPSTREAM_HEAD=$(git rev-parse upstream/master)
+          echo "Upstream HEAD: $UPSTREAM_HEAD"
+          
+          # 尝试寻找共同祖先。如果失败 (exit code 1, 通常意味着不相关历史)，则将 MERGE_BASE 设为空。
+          if ! MERGE_BASE=$(git merge-base HEAD upstream/master 2>/dev/null); then
+            echo "Warning: git merge-base failed (likely due to unrelated histories). Assuming full update is required."
+            MERGE_BASE=""
+          fi
+
+          echo "Merge Base:    ${MERGE_BASE:-N/A}"
+          
+          # 逻辑判断：
+          # 1. 如果找到了 MERGE_BASE 并且它不等于 UPSTREAM_HEAD，说明有新更新。
+          # 2. 如果 MERGE_BASE 为空 (即 merge-base 失败)，则强制视为有更新。
+          if [ -z "$MERGE_BASE" ] || [ "$MERGE_BASE" != "$UPSTREAM_HEAD" ]; then
+            echo "Update required (either new commits found or histories are unrelated)."
+            echo "has_update=true" >> $GITHUB_OUTPUT
+          else
+            echo "No new commits found in upstream."
+            echo "has_update=false" >> $GITHUB_OUTPUT
+          fi
+
+      # 步骤 c: 备份工作流文件及脚本并强制重置到上游状态
+      - name: Backup workflow and reset to upstream
+        run: |
+          echo "Backing up workflow files to /tmp/"
+          # 备份 sync-and-patch.yml
+          cp .github/workflows/sync-and-patch.yml /tmp/sync-and-patch.yml
+          if [ -f .github/scripts/patch_build_workflow.py ]; then
+            cp .github/scripts/patch_build_workflow.py /tmp/patch_build_workflow.py
+            echo "Backed up patch_build_workflow.py"
+          else
+            echo "patch_build_workflow.py not found, skipping backup"
+          fi
+          # 备份 clear-dockers.yml（如果存在）
+          if [ -f .github/workflows/clear-dockers.yml ]; then
+            cp .github/workflows/clear-dockers.yml /tmp/clear-dockers.yml
+            echo "Backed up clear-dockers.yml"
+          else
+            echo "clear-dockers.yml not found, skipping backup"
+          fi
+          
+          echo "Resetting current branch to upstream/master"
+          git reset --hard upstream/master
+
+      # 步骤 d: 恢复补丁脚本并执行
+      - name: Restore patch script and run
+        run: |
+          if [ -f /tmp/patch_build_workflow.py ]; then
+            mkdir -p .github/scripts
+            cp /tmp/patch_build_workflow.py .github/scripts/patch_build_workflow.py
+            echo "Restored patch_build_workflow.py"
+            python3 .github/scripts/patch_build_workflow.py
+          else
+            echo "Error: patch_build_workflow.py backup not found in /tmp"
+            exit 1
+          fi
+
+      # 步骤 e: 恢复其他工作流文件
+      - name: Restore other workflow files
+        run: |
+          echo "Restoring workflow files from /tmp/"
+          # 确保目录存在
+          mkdir -p .github/workflows
+          # 恢复 sync-and-patch.yml
+          cp /tmp/sync-and-patch.yml .github/workflows/sync-and-patch.yml
+          # 恢复 clear-dockers.yml（如果备份存在）
+          if [ -f /tmp/clear-dockers.yml ]; then
+            cp /tmp/clear-dockers.yml .github/workflows/clear-dockers.yml
+            echo "Restored clear-dockers.yml"
+          else
+            echo "clear-dockers.yml backup not found, skipping restore"
+          fi
+
+      # 步骤 e+0.5: 提交并强制推送到仓库
+      - name: Commit and push changes
+        run: |
+          git add .
+          # 检查是否有文件变动，只有在有变动时才提交和推送
+          if ! git diff --staged --quiet; then
+            echo "Changes detected, committing and pushing..."
+            git commit -m "chore: Sync with upstream and apply patches"
+            # 使用 --force 是必需的，因为我们用了 git reset --hard 来重写历史
+            git push origin ${{ github.ref_name }} --force
+          else
+            echo "No changes to commit."
+          fi
+
+      # 步骤 f: 如果有更新，则触发 build.yml
+      - name: Trigger build workflow if updated
+        # 仅当步骤 'check_update' 的输出 has_update 为 'true' 时运行
+        if: steps.check_update.outputs.has_update == 'true'
+        env:
+          # 使用 PAT 进行认证，以触发另一个工作流
+          GH_TOKEN: ${{ secrets.FFMPEG_UPDATE_TOKEN }}
+          # 获取当前分支名
+          CURRENT_BRANCH: ${{ github.ref_name }}
+        run: |
+          echo "Triggering 'build.yml' workflow on branch '$CURRENT_BRANCH'..."
+          # 等待几秒钟，确保 Git 推送已在 GitHub 端完全处理
+          sleep 15
+          gh workflow run build.yml --ref $CURRENT_BRANCH --repo ${{ github.repository }} -f doRelease=true
